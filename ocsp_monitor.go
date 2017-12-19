@@ -161,7 +161,7 @@ func (wi *WorkItem) setErr(err error, ocsp_test *OCSPTest) bool {
 	}
 }
 
-func (wi *WorkItem) doOCSP(method string, ocsp_req_bytes []byte, ocsp_test *OCSPTest, issuer *x509.Certificate) {
+func (wi *WorkItem) doOCSP(method string, ocsp_req_bytes []byte, ocsp_test *OCSPTest, cert *x509.Certificate, issuer *x509.Certificate) {
 	var req *http.Request
 	var err error
 	if method == "GET" {
@@ -205,7 +205,7 @@ func (wi *WorkItem) doOCSP(method string, ocsp_req_bytes []byte, ocsp_test *OCSP
 		return
 	}
 
-	ocsp_resp, err := ocsp.ParseResponse(body, issuer)
+	ocsp_resp, err := ocsp.ParseResponseForCert(body, cert, issuer)
 	if err != nil {
 		if resp.StatusCode != 200 {
 			ocsp_test.result.Valid = true
@@ -261,7 +261,7 @@ func (wi *WorkItem) RandomSerialTest(issuer *x509.Certificate) {
 		return
 	}
 
-	wi.doOCSP("POST", ocsp_req_bytes, &wi.random_serial_test, issuer)
+	wi.doOCSP("POST", ocsp_req_bytes, &wi.random_serial_test, nil, issuer)
 }
 
 func (wi *WorkItem) GETTest(issuer *x509.Certificate, cert *x509.Certificate) {
@@ -270,7 +270,7 @@ func (wi *WorkItem) GETTest(issuer *x509.Certificate, cert *x509.Certificate) {
 		return
 	}
 
-	wi.doOCSP("GET", ocsp_req_bytes, &wi.get_test, issuer)
+	wi.doOCSP("GET", ocsp_req_bytes, &wi.get_test, cert, issuer)
 }
 
 func (wi *WorkItem) POSTTest(issuer *x509.Certificate, cert *x509.Certificate) {
@@ -279,7 +279,7 @@ func (wi *WorkItem) POSTTest(issuer *x509.Certificate, cert *x509.Certificate) {
 		return
 	}
 
-	wi.doOCSP("POST", ocsp_req_bytes, &wi.post_test, issuer)
+	wi.doOCSP("POST", ocsp_req_bytes, &wi.post_test, cert, issuer)
 }
 
 // WorkItem.Perform()
