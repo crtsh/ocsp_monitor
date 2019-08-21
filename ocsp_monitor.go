@@ -81,11 +81,15 @@ SELECT c.CERTIFICATE
 
 	// TODO: Also check that this cert does contain the OCSP Responder URL we're testing?
 	w.get_test_cert_statement, err = db.Prepare(`
-SELECT c.ID, c.CERTIFICATE
-	FROM certificate c
-	WHERE c.ISSUER_CA_ID = $1
-		AND x509_notAfter(c.CERTIFICATE) > statement_timestamp() AT TIME ZONE 'UTC'
-	LIMIT 1
+SELECT sub.ID, sub.CERTIFICATE
+	FROM (
+		SELECT c.ID, c.CERTIFICATE, x509_notAfter(c.CERTIFICATE) NOT_AFTER
+			FROM certificate c
+			WHERE c.ISSUER_CA_ID = $1
+			ORDER BY x509_notBefore(c.CERTIFICATE) DESC
+			LIMIT 1
+	) sub
+	WHERE sub.NOT_AFTER > statement_timestamp() AT TIME ZONE 'UTC'
 `)
 	checkErr(err)
 }
