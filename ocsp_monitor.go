@@ -23,7 +23,23 @@ import (
 	"time"
 )
 
+type config struct {
+	// Common configuration parameters shared by all processors.
+	ConnInfo string
+	ConnOpen int
+	ConnIdle int
+	ConnLife duration
+	Interval duration
+	Batch int
+	Concurrent int
+	// Processor-specific config.
+	Chunk int
+	HTTPTimeout duration
+}
+
 type Work struct {
+	c *config
+	db *sql.DB
 	timeout time.Duration
 	transport http.Transport
 	http_client http.Client
@@ -55,22 +71,23 @@ func checkRedirectURL(req *http.Request, via []*http.Request) error {
 	return nil
 }
 
-func (w *Work) CustomFlags() string {
-	flag.DurationVar(&w.timeout, "timeout", 30 * time.Second, "HTTP timeout")
-	return fmt.Sprintf("  timeout: %s\n", w.timeout)
+// tomlConfig.DefineCustomFlags() and tomlConfig.PrintCustomFlags()
+// Specify command-line flags that are specific to this processor.
+func (c *config) DefineCustomFlags() {
+	flag.DurationVar(&c.HTTPTimeout.Duration, "httptimeout", c.HTTPTimeout.Duration, "HTTP timeout")
+}
+func (c *config) PrintCustomFlags() string {
+	return fmt.Sprintf("httptimeout:%s", c.HTTPTimeout.Duration)
 }
 
-func (w *Work) Init() {
+func (w *Work) Init(c *config) {
+	w.c = c
 	w.transport = http.Transport { TLSClientConfig: &tls.Config { InsecureSkipVerify: true } }
 	w.http_client = http.Client { CheckRedirect: checkRedirectURL, Timeout: w.timeout, Transport: &w.transport }
-}
 
-// Work.Begin
-// Do any DB stuff that needs to happen before a batch of work.
-func (w *Work) Begin(db *sql.DB) {
 	var err error
 
-	w.get_issuer_cert_statement, err = db.Prepare(`
+	w.get_issuer_cert_statement, err = w.db.Prepare(`
 SELECT c.CERTIFICATE
 	FROM ca_certificate cac, certificate c
 	WHERE cac.CA_ID = $1
@@ -80,7 +97,7 @@ SELECT c.CERTIFICATE
 	checkErr(err)
 
 	// TODO: Also check that this cert does contain the OCSP Responder URL we're testing?
-	w.get_test_cert_statement, err = db.Prepare(`
+	w.get_test_cert_statement, err = w.db.Prepare(`
 SELECT sub.ID, sub.CERTIFICATE
 	FROM (
 		SELECT c.ID, c.CERTIFICATE, x509_notAfter(c.CERTIFICATE) NOT_AFTER
@@ -94,9 +111,19 @@ SELECT sub.ID, sub.CERTIFICATE
 	checkErr(err)
 }
 
+// Work.Begin
+// Do any DB stuff that needs to happen before a batch of work.
+func (w *Work) Begin(db *sql.DB) {
+}
+
 // Work.End
 // Do any DB stuff that needs to happen after a batch of work.
 func (w *Work) End() {
+}
+
+// Work.Exit
+// One-time program exit code.
+func (w *Work) Exit() {
 	w.get_issuer_cert_statement.Close()
 	w.get_test_cert_statement.Close()
 }
