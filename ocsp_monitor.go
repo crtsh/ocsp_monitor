@@ -79,7 +79,8 @@ type WorkItem struct {
 	test_cert []byte
 	get_test OCSPTest
 	post_test OCSPTest
-	random_serial_test OCSPTest
+	get_random_serial_test OCSPTest
+	post_random_serial_test OCSPTest
 }
 
 func checkRedirectURL(req *http.Request, via []*http.Request) error {
@@ -171,17 +172,21 @@ func (wi *WorkItem) checkErr(err error) {
 			error_message = err.Error()
 		}
 
-		if !wi.get_test.result.Valid {
+		if (!wi.get_test.result.Valid) && (wi.get_test.result.String == "") {
 			wi.get_test.result.String = error_message
 			wi.get_test.result.Valid = true
 		}
-		if !wi.post_test.result.Valid {
+		if (!wi.post_test.result.Valid) && (wi.post_test.result.String == "") {
 			wi.post_test.result.String = error_message
 			wi.post_test.result.Valid = true
 		}
-		if !wi.random_serial_test.result.Valid {
-			wi.random_serial_test.result.String = error_message
-			wi.random_serial_test.result.Valid = true
+		if (!wi.get_random_serial_test.result.Valid) && (wi.get_random_serial_test.result.String == "") {
+			wi.get_random_serial_test.result.String = error_message
+			wi.get_random_serial_test.result.Valid = true
+		}
+		if (!wi.post_random_serial_test.result.Valid) && (wi.post_random_serial_test.result.String == "") {
+			wi.post_random_serial_test.result.String = error_message
+			wi.post_random_serial_test.result.Valid = true
 		}
 
 		panic(err)
@@ -273,13 +278,13 @@ func (wi *WorkItem) doOCSP(method string, ocsp_req_bytes []byte, ocsp_test *OCSP
 	ocsp_test.result.Valid = true
 }
 
-func (wi *WorkItem) RandomSerialTest(issuer *x509.Certificate) {
+func (wi *WorkItem) RandomSerialTest(method string, ocsp_test *OCSPTest, issuer *x509.Certificate) {
 	var publicKeyInfo struct {
 		Algorithm pkix.AlgorithmIdentifier
 		PublicKey asn1.BitString
 	}
 	_, err := asn1.Unmarshal(issuer.RawSubjectPublicKeyInfo, &publicKeyInfo)
-	if wi.setErr(err, &wi.random_serial_test) {
+	if wi.setErr(err, ocsp_test) {
 		return
 	}
 
@@ -296,36 +301,27 @@ func (wi *WorkItem) RandomSerialTest(issuer *x509.Certificate) {
 	random_serial := [20]byte{}
 	copy(random_serial[:], "crt.sh")
 	_, err = rand.Read(random_serial[6:])
-	if wi.setErr(err, &wi.random_serial_test) {
+	if wi.setErr(err, ocsp_test) {
 		return
 	}
 	ocsp_req.SerialNumber = big.NewInt(0)
 	ocsp_req.SerialNumber.SetBytes(random_serial[:])
 
 	ocsp_req_bytes, err := ocsp_req.Marshal()
-	if wi.setErr(err, &wi.random_serial_test) {
+	if wi.setErr(err, ocsp_test) {
 		return
 	}
 
-	wi.doOCSP("POST", ocsp_req_bytes, &wi.random_serial_test, nil, issuer)
+	wi.doOCSP(method, ocsp_req_bytes, ocsp_test, nil, issuer)
 }
 
-func (wi *WorkItem) GETTest(issuer *x509.Certificate, cert *x509.Certificate) {
+func (wi *WorkItem) IssuedSerialTest(method string, ocsp_test *OCSPTest, issuer *x509.Certificate, cert *x509.Certificate) {
 	ocsp_req_bytes, err := ocsp.CreateRequest(cert, issuer, nil)
-	if wi.setErr(err, &wi.get_test) {
+	if wi.setErr(err, ocsp_test) {
 		return
 	}
 
-	wi.doOCSP("GET", ocsp_req_bytes, &wi.get_test, cert, issuer)
-}
-
-func (wi *WorkItem) POSTTest(issuer *x509.Certificate, cert *x509.Certificate) {
-	ocsp_req_bytes, err := ocsp.CreateRequest(cert, issuer, nil)
-	if wi.setErr(err, &wi.post_test) {
-		return
-	}
-
-	wi.doOCSP("POST", ocsp_req_bytes, &wi.post_test, cert, issuer)
+	wi.doOCSP(method, ocsp_req_bytes, ocsp_test, cert, issuer)
 }
 
 // WorkItem.Perform()
@@ -333,14 +329,21 @@ func (wi *WorkItem) POSTTest(issuer *x509.Certificate, cert *x509.Certificate) {
 func (wi *WorkItem) Perform(db *sql.DB, w *Work) {
 	wi.work = w
 	wi.get_test.result.Valid = false
+	wi.get_test.result.String = ""
 	wi.get_test.dump = wi.get_test.dump[:0]
 	wi.get_test.duration = 0
 	wi.post_test.result.Valid = false
+	wi.post_test.result.String = ""
 	wi.post_test.dump = wi.get_test.dump[:0]
 	wi.post_test.duration = 0
-	wi.random_serial_test.result.Valid = false
-	wi.random_serial_test.dump = wi.random_serial_test.dump[:0]
-	wi.random_serial_test.duration = 0
+	wi.get_random_serial_test.result.Valid = false
+	wi.get_random_serial_test.result.String = ""
+	wi.get_random_serial_test.dump = wi.get_random_serial_test.dump[:0]
+	wi.get_random_serial_test.duration = 0
+	wi.post_random_serial_test.result.Valid = false
+	wi.post_random_serial_test.result.String = ""
+	wi.post_random_serial_test.dump = wi.post_random_serial_test.dump[:0]
+	wi.post_random_serial_test.duration = 0
 
 	// Fetch and parse the/an Issuer certificate.
 	err := w.get_issuer_cert_statement.QueryRow(wi.ca_id).Scan(&wi.issuer_cert)
@@ -348,9 +351,13 @@ func (wi *WorkItem) Perform(db *sql.DB, w *Work) {
 	issuer, err := x509.ParseCertificate(wi.issuer_cert)
 	wi.checkErr(err)
 
-	// Test how the responder deals with an unissued serial number.
-	wi.RandomSerialTest(issuer)
-	log.Printf("Unissued: %s [%d, %s]", wi.random_serial_test.result.String, wi.ca_id, wi.ocsp_responder_url)
+	// Test how the responder deals with a GET request for an unissued serial number.
+	wi.RandomSerialTest("GET", &wi.get_random_serial_test, issuer)
+	log.Printf("Unissued: %s [%d, %s]", wi.get_random_serial_test.result.String, wi.ca_id, wi.ocsp_responder_url)
+
+	// Test how the responder deals with a POST request for an unissued serial number.
+	wi.RandomSerialTest("POST", &wi.post_random_serial_test, issuer)
+	log.Printf("Unissued: %s [%d, %s]", wi.post_random_serial_test.result.String, wi.ca_id, wi.ocsp_responder_url)
 
 	// Get an unexpired certificate issued by this issuer.
 	err = w.get_test_cert_statement.QueryRow(wi.ca_id).Scan(&wi.test_cert_id, &wi.test_cert)
@@ -363,11 +370,11 @@ func (wi *WorkItem) Perform(db *sql.DB, w *Work) {
 	wi.checkErr(err)
 
 	// Test how the responder deals with a GET request for an unexpired cert.
-	wi.GETTest(issuer, cert)
+	wi.IssuedSerialTest("GET", &wi.get_test, issuer, cert)
 	log.Printf("GET: %s [%d, %s]", wi.get_test.result.String, wi.ca_id, wi.ocsp_responder_url)
 
 	// Test how the responder deals with a POST request for an unexpired cert.
-	wi.POSTTest(issuer, cert)
+	wi.IssuedSerialTest("POST", &wi.post_test, issuer, cert)
 	log.Printf("POST: %s [%d, %s]", wi.post_test.result.String, wi.ca_id, wi.ocsp_responder_url)
 }
 
@@ -385,11 +392,14 @@ UPDATE ocsp_responder
 		POST_RESULT=$5,
 		POST_DUMP=$6,
 		POST_DURATION=$7,
-		RANDOM_SERIAL_RESULT=$8,
-		RANDOM_SERIAL_DUMP=$9,
-		RANDOM_SERIAL_DURATION=$10
-	WHERE CA_ID=$11
-		AND URL=$12
+		GET_RANDOM_SERIAL_RESULT=$8,
+		GET_RANDOM_SERIAL_DUMP=$9,
+		GET_RANDOM_SERIAL_DURATION=$10,
+		POST_RANDOM_SERIAL_RESULT=$11,
+		POST_RANDOM_SERIAL_DUMP=$12,
+		POST_RANDOM_SERIAL_DURATION=$13
+	WHERE CA_ID=$14
+		AND URL=$15
 `
 }
 
@@ -400,6 +410,7 @@ func (wi *WorkItem) Update(update_statement *sql.Stmt) (sql.Result, error) {
 		wi.test_cert_id,
 		wi.get_test.result, wi.get_test.dump, wi.get_test.duration,
 		wi.post_test.result, wi.post_test.dump, wi.post_test.duration,
-		wi.random_serial_test.result, wi.random_serial_test.dump, wi.random_serial_test.duration,
+		wi.get_random_serial_test.result, wi.get_random_serial_test.dump, wi.get_random_serial_test.duration,
+		wi.post_random_serial_test.result, wi.post_random_serial_test.dump, wi.post_random_serial_test.duration,
 		wi.ca_id, wi.ocsp_responder_url)
 }
