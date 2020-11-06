@@ -207,11 +207,6 @@ func (wi *WorkItem) setErr(err error, ocsp_test *OCSPTest) bool {
 }
 
 func (wi *WorkItem) doOCSP(method string, ocsp_req_bytes []byte, ocsp_test *OCSPTest, cert *x509.Certificate, issuer *x509.Certificate) {
-	// Don't test this.  It makes the application hang, for some reason.
-	if strings.Contains(wi.ocsp_responder_url, ".cospi.net") {
-		return
-	}
-
 	var req *http.Request
 	var err error
 	if method == "GET" {
