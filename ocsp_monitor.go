@@ -1,6 +1,6 @@
 /* crt.sh: ocsp_monitor - OCSP Responder Monitor
  * Written by Rob Stradling
- * Copyright (C) 2017-2020 Sectigo Limited
+ * Copyright (C) 2017-2021 Sectigo Limited
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -81,6 +81,7 @@ type WorkItem struct {
 	post_test OCSPTest
 	get_random_serial_test OCSPTest
 	post_random_serial_test OCSPTest
+	forward_slashes_test OCSPTest
 }
 
 func checkRedirectURL(req *http.Request, via []*http.Request) error {
@@ -189,6 +190,10 @@ func (wi *WorkItem) checkErr(err error) {
 		if (!wi.post_random_serial_test.result.Valid) && (wi.post_random_serial_test.result.String == "") {
 			wi.post_random_serial_test.result.String = error_message
 			wi.post_random_serial_test.result.Valid = true
+		}
+		if (!wi.forward_slashes_test.result.Valid) && (wi.forward_slashes_test.result.String == "") {
+			wi.forward_slashes_test.result.String = error_message
+			wi.forward_slashes_test.result.Valid = true
 		}
 
 		panic(err)
@@ -317,6 +322,23 @@ func (wi *WorkItem) RandomSerialTest(method string, ocsp_test *OCSPTest, issuer 
 	wi.doOCSP(method, ocsp_req_bytes, ocsp_test, nil, issuer)
 }
 
+func (wi *WorkItem) ForwardSlashesTest(method string, ocsp_test *OCSPTest, issuer *x509.Certificate) {
+	var ocsp_req ocsp.Request
+	ocsp_req.HashAlgorithm = crypto.Hash(crypto.SHA1)
+	ocsp_req.IssuerKeyHash = make([]byte, 20)
+	ocsp_req.IssuerNameHash = make([]byte, 20)
+
+	ocsp_req.SerialNumber = big.NewInt(0)
+	ocsp_req.SerialNumber.SetBytes([]byte{0x03, 0xFF, 0xFC})	// https://groups.google.com/a/mozilla.org/g/dev-security-policy/c/cMegyySSqhM/m/G7s5tFR4BAAJ
+
+	ocsp_req_bytes, err := ocsp_req.Marshal()
+	if wi.setErr(err, ocsp_test) {
+		return
+	}
+
+	wi.doOCSP(method, ocsp_req_bytes, ocsp_test, nil, issuer)
+}
+
 func (wi *WorkItem) IssuedSerialTest(method string, ocsp_test *OCSPTest, issuer *x509.Certificate, cert *x509.Certificate) {
 	ocsp_req_bytes, err := ocsp.CreateRequest(cert, issuer, nil)
 	if wi.setErr(err, ocsp_test) {
@@ -336,7 +358,7 @@ func (wi *WorkItem) Perform(db *sql.DB, w *Work) {
 	wi.get_test.duration = 0
 	wi.post_test.result.Valid = false
 	wi.post_test.result.String = ""
-	wi.post_test.dump = wi.get_test.dump[:0]
+	wi.post_test.dump = wi.post_test.dump[:0]
 	wi.post_test.duration = 0
 	wi.get_random_serial_test.result.Valid = false
 	wi.get_random_serial_test.result.String = ""
@@ -346,6 +368,10 @@ func (wi *WorkItem) Perform(db *sql.DB, w *Work) {
 	wi.post_random_serial_test.result.String = ""
 	wi.post_random_serial_test.dump = wi.post_random_serial_test.dump[:0]
 	wi.post_random_serial_test.duration = 0
+	wi.forward_slashes_test.result.Valid = false
+	wi.forward_slashes_test.result.String = ""
+	wi.forward_slashes_test.dump = wi.forward_slashes_test.dump[:0]
+	wi.forward_slashes_test.duration = 0
 
 	// Fetch and parse the/an Issuer certificate.
 	err := w.get_issuer_cert_statement.QueryRow(wi.ca_id).Scan(&wi.issuer_cert)
@@ -360,6 +386,10 @@ func (wi *WorkItem) Perform(db *sql.DB, w *Work) {
 	// Test how the responder deals with a POST request for an unissued serial number.
 	wi.RandomSerialTest("POST", &wi.post_random_serial_test, issuer)
 	log.Printf("Unissued: %s [%d, %s]", wi.post_random_serial_test.result.String, wi.ca_id, wi.ocsp_responder_url)
+
+	// Test how the responder deals with multiple forward-slashes.
+	wi.ForwardSlashesTest("GET", &wi.forward_slashes_test, issuer)
+	log.Printf("Forward-slashes: %s [%d, %s]", wi.forward_slashes_test.result.String, wi.ca_id, wi.ocsp_responder_url)
 
 	// Get an unexpired certificate issued by this issuer.
 	err = w.get_test_cert_statement.QueryRow(wi.ca_id).Scan(&wi.test_cert_id, &wi.test_cert)
@@ -399,9 +429,12 @@ UPDATE ocsp_responder
 		GET_RANDOM_SERIAL_DURATION=$10,
 		POST_RANDOM_SERIAL_RESULT=$11,
 		POST_RANDOM_SERIAL_DUMP=$12,
-		POST_RANDOM_SERIAL_DURATION=$13
-	WHERE CA_ID=$14
-		AND URL=$15
+		POST_RANDOM_SERIAL_DURATION=$13,
+		FORWARD_SLASHES_RESULT=$14,
+		FORWARD_SLASHES_DUMP=$15,
+		FORWARD_SLASHES_DURATION=$16
+	WHERE CA_ID=$17
+		AND URL=$18
 `
 }
 
@@ -414,5 +447,6 @@ func (wi *WorkItem) Update(update_statement *sql.Stmt) (sql.Result, error) {
 		wi.post_test.result, wi.post_test.dump, wi.post_test.duration,
 		wi.get_random_serial_test.result, wi.get_random_serial_test.dump, wi.get_random_serial_test.duration,
 		wi.post_random_serial_test.result, wi.post_random_serial_test.dump, wi.post_random_serial_test.duration,
+		wi.forward_slashes_test.result, wi.forward_slashes_test.dump, wi.forward_slashes_test.duration,
 		wi.ca_id, wi.ocsp_responder_url)
 }
