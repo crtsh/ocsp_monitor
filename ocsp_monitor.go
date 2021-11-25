@@ -118,8 +118,10 @@ SELECT c.CERTIFICATE
 	w.get_test_cert_statement, err = w.db.Prepare(`
 SELECT c.ID, c.CERTIFICATE
 	FROM certificate c
+			LEFT OUTER JOIN ca_certificate cac ON (c.ID = cac.CERTIFICATE_ID)
 	WHERE c.ISSUER_CA_ID = $1
 		AND coalesce(x509_notAfter(c.CERTIFICATE), 'infinity'::timestamp) > now() AT TIME ZONE 'UTC'
+		AND c.ISSUER_CA_ID != coalesce(cac.CA_ID, -1)
 	ORDER BY coalesce(x509_notAfter(c.CERTIFICATE), 'infinity'::timestamp) DESC
 	LIMIT 1
 `)
