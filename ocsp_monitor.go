@@ -200,16 +200,19 @@ func (wi *WorkItem) checkErr(err error) {
 	}
 }
 
-func (wi *WorkItem) setErr(err error, ocsp_test *OCSPTest) bool {
+func (wi *WorkItem) setErr(err error, error_context string, ocsp_test *OCSPTest) bool {
 	if err == nil {
 		return false
 	} else {
 		error_message := ""
+		if error_context != "" {
+			error_message = error_context + " => "
+		}
 		last_colon := strings.LastIndex(err.Error(), ": ")
 		if last_colon != -1 {
-			error_message = err.Error()[last_colon+2:]
+			error_message += err.Error()[last_colon+2:]
 		} else {
-			error_message = err.Error()
+			error_message += err.Error()
 		}
 
 		ocsp_test.result.String = error_message
@@ -234,7 +237,7 @@ func (wi *WorkItem) doOCSP(method string, ocsp_req_bytes []byte, ocsp_test *OCSP
 		return
 	}
 
-	if wi.setErr(err, ocsp_test) {
+	if wi.setErr(err, "http.NewRequest", ocsp_test) {
 		return
 	}
 
@@ -245,20 +248,20 @@ func (wi *WorkItem) doOCSP(method string, ocsp_req_bytes []byte, ocsp_test *OCSP
 	resp, err := wi.work.http_client.Do(req)
 	if err != nil && resp == nil {
 		ocsp_test.duration = time.Since(time_start)
-		if wi.setErr(err, ocsp_test) {
+		if wi.setErr(err, "http_client.Do", ocsp_test) {
 			return
 		}
 	}
 	defer resp.Body.Close()
 
 	ocsp_test.dump, err = httputil.DumpResponse(resp, true)
-	if wi.setErr(err, ocsp_test) {
+	if wi.setErr(err, "httputil.DumpResponse", ocsp_test) {
 		return
 	}
 
 	body, err := ioutil.ReadAll(resp.Body)
 	ocsp_test.duration = time.Since(time_start)
-	if wi.setErr(err, ocsp_test) {
+	if wi.setErr(err, "io.ReadAll", ocsp_test) {
 		return
 	}
 
@@ -268,8 +271,15 @@ func (wi *WorkItem) doOCSP(method string, ocsp_req_bytes []byte, ocsp_test *OCSP
 			ocsp_test.result.Valid = true
 			ocsp_test.result.String = fmt.Sprintf("HTTP %d", resp.StatusCode)
 			return
-		} else if wi.setErr(err, ocsp_test) {
-			return
+		} else {
+			error_context := ""
+			switch err.(type) {
+				case ocsp.ResponseError:
+				default: error_context = "ocsp.ParseResponseForCert"
+			}
+			if wi.setErr(err, error_context, ocsp_test) {
+				return
+			}
 		}
 	}
 
@@ -291,7 +301,7 @@ func (wi *WorkItem) RandomSerialTest(method string, ocsp_test *OCSPTest, issuer 
 		PublicKey asn1.BitString
 	}
 	_, err := asn1.Unmarshal(issuer.RawSubjectPublicKeyInfo, &publicKeyInfo)
-	if wi.setErr(err, ocsp_test) {
+	if wi.setErr(err, "asn1.Unmarshal(issuer.RawSubjectPublicKeyInfo)", ocsp_test) {
 		return
 	}
 
@@ -308,14 +318,14 @@ func (wi *WorkItem) RandomSerialTest(method string, ocsp_test *OCSPTest, issuer 
 	random_serial := [20]byte{}
 	copy(random_serial[:], "crt.sh")
 	_, err = rand.Read(random_serial[6:])
-	if wi.setErr(err, ocsp_test) {
+	if wi.setErr(err, "rand.Read", ocsp_test) {
 		return
 	}
 	ocsp_req.SerialNumber = big.NewInt(0)
 	ocsp_req.SerialNumber.SetBytes(random_serial[:])
 
 	ocsp_req_bytes, err := ocsp_req.Marshal()
-	if wi.setErr(err, ocsp_test) {
+	if wi.setErr(err, "ocsp_req.Marshal", ocsp_test) {
 		return
 	}
 
@@ -332,7 +342,7 @@ func (wi *WorkItem) ForwardSlashesTest(method string, ocsp_test *OCSPTest, issue
 	ocsp_req.SerialNumber.SetBytes([]byte{0x03, 0xFF, 0xFC})	// https://groups.google.com/a/mozilla.org/g/dev-security-policy/c/cMegyySSqhM/m/G7s5tFR4BAAJ
 
 	ocsp_req_bytes, err := ocsp_req.Marshal()
-	if wi.setErr(err, ocsp_test) {
+	if wi.setErr(err, "ocsp_req.Marshal", ocsp_test) {
 		return
 	}
 
@@ -341,7 +351,7 @@ func (wi *WorkItem) ForwardSlashesTest(method string, ocsp_test *OCSPTest, issue
 
 func (wi *WorkItem) IssuedSerialTest(method string, ocsp_test *OCSPTest, issuer *x509.Certificate, cert *x509.Certificate) {
 	ocsp_req_bytes, err := ocsp.CreateRequest(cert, issuer, nil)
-	if wi.setErr(err, ocsp_test) {
+	if wi.setErr(err, "ocsp.CreateRequest", ocsp_test) {
 		return
 	}
 
