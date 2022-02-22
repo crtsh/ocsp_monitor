@@ -31,7 +31,7 @@ import (
 	"flag"
 	"fmt"
 	"golang.org/x/crypto/ocsp"
-	"io/ioutil"
+	"io"
 	"log"
 	"math/big"
 	"net/http"
@@ -82,6 +82,8 @@ type WorkItem struct {
 	get_random_serial_test OCSPTest
 	post_random_serial_test OCSPTest
 	forward_slashes_test OCSPTest
+	sha256_certid_test OCSPTest
+	unencoded_plus_test OCSPTest
 }
 
 func checkRedirectURL(req *http.Request, via []*http.Request) error {
@@ -115,7 +117,6 @@ SELECT c.CERTIFICATE
 `)
 	checkErr(err)
 
-	// TODO: Also check that this cert does contain the OCSP Responder URL we're testing?
 	w.get_test_cert_statement, err = w.db.Prepare(`
 SELECT c.ID, c.CERTIFICATE
 	FROM certificate c
@@ -152,7 +153,7 @@ func (w *Work) SelectQuery(batch_size int) string {
 	return fmt.Sprintf(`
 SELECT orp.CA_ID, orp.URL
 	FROM ocsp_responder orp
-	WHERE orp.NEXT_CHECKS_DUE < statement_timestamp() AT TIME ZONE 'UTC'
+	WHERE orp.NEXT_CHECKS_DUE < now() AT TIME ZONE 'UTC'
 		AND orp.CA_ID != -1
 	ORDER BY orp.NEXT_CHECKS_DUE
 	LIMIT %d
@@ -195,6 +196,14 @@ func (wi *WorkItem) checkErr(err error) {
 			wi.forward_slashes_test.result.String = error_message
 			wi.forward_slashes_test.result.Valid = true
 		}
+		if (!wi.sha256_certid_test.result.Valid) && (wi.sha256_certid_test.result.String == "") {
+			wi.sha256_certid_test.result.String = error_message
+			wi.sha256_certid_test.result.Valid = true
+		}
+		if (!wi.unencoded_plus_test.result.Valid) && (wi.unencoded_plus_test.result.String == "") {
+			wi.unencoded_plus_test.result.String = error_message
+			wi.unencoded_plus_test.result.Valid = true
+		}
 
 		panic(err)
 	}
@@ -221,7 +230,7 @@ func (wi *WorkItem) setErr(err error, error_context string, ocsp_test *OCSPTest)
 	}
 }
 
-func (wi *WorkItem) doOCSP(method string, ocsp_req_bytes []byte, ocsp_test *OCSPTest, cert *x509.Certificate, issuer *x509.Certificate) {
+func (wi *WorkItem) doOCSP(method string, ocsp_req_bytes []byte, ocsp_test *OCSPTest, cert *x509.Certificate, issuer *x509.Certificate, encode_pluses bool) {
 	var req *http.Request
 	var err error
 	if method == "GET" {
@@ -229,7 +238,11 @@ func (wi *WorkItem) doOCSP(method string, ocsp_req_bytes []byte, ocsp_test *OCSP
 		if !strings.HasSuffix(request_url, "/") {
 			request_url += "/"
 		}
-		request_url += url.QueryEscape(base64.StdEncoding.EncodeToString(ocsp_req_bytes))
+		if encode_pluses {
+			request_url += url.QueryEscape(base64.StdEncoding.EncodeToString(ocsp_req_bytes))
+		} else {
+			request_url += url.PathEscape(base64.StdEncoding.EncodeToString(ocsp_req_bytes))
+		}
 		req, err = http.NewRequest(method, request_url, nil)
 	} else if method == "POST" {
 		req, err = http.NewRequest(method, wi.ocsp_responder_url, bytes.NewReader(ocsp_req_bytes))
@@ -259,7 +272,7 @@ func (wi *WorkItem) doOCSP(method string, ocsp_req_bytes []byte, ocsp_test *OCSP
 		return
 	}
 
-	body, err := ioutil.ReadAll(resp.Body)
+	body, err := io.ReadAll(resp.Body)
 	ocsp_test.duration = time.Since(time_start)
 	if wi.setErr(err, "io.ReadAll", ocsp_test) {
 		return
@@ -329,7 +342,7 @@ func (wi *WorkItem) RandomSerialTest(method string, ocsp_test *OCSPTest, issuer 
 		return
 	}
 
-	wi.doOCSP(method, ocsp_req_bytes, ocsp_test, nil, issuer)
+	wi.doOCSP(method, ocsp_req_bytes, ocsp_test, nil, issuer, true)
 }
 
 func (wi *WorkItem) ForwardSlashesTest(method string, ocsp_test *OCSPTest, issuer *x509.Certificate) {
@@ -346,16 +359,34 @@ func (wi *WorkItem) ForwardSlashesTest(method string, ocsp_test *OCSPTest, issue
 		return
 	}
 
-	wi.doOCSP(method, ocsp_req_bytes, ocsp_test, nil, issuer)
+	wi.doOCSP(method, ocsp_req_bytes, ocsp_test, nil, issuer, true)
 }
 
-func (wi *WorkItem) IssuedSerialTest(method string, ocsp_test *OCSPTest, issuer *x509.Certificate, cert *x509.Certificate) {
-	ocsp_req_bytes, err := ocsp.CreateRequest(cert, issuer, nil)
+func (wi *WorkItem) UnencodedPlusTest(method string, ocsp_test *OCSPTest, issuer *x509.Certificate) {
+	var ocsp_req ocsp.Request
+	ocsp_req.HashAlgorithm = crypto.Hash(crypto.SHA1)
+	ocsp_req.IssuerKeyHash = make([]byte, 20)
+	ocsp_req.IssuerNameHash = make([]byte, 20)
+
+	ocsp_req.SerialNumber = big.NewInt(0)
+	ocsp_req.SerialNumber.SetBytes([]byte{0x03, 0xFE, 0xFC})	// https://groups.google.com/a/mozilla.org/g/dev-security-policy/c/cMegyySSqhM/m/zcJwbdNnAwAJ
+
+	ocsp_req_bytes, err := ocsp_req.Marshal()
+	if wi.setErr(err, "ocsp_req.Marshal", ocsp_test) {
+		return
+	}
+
+	wi.doOCSP(method, ocsp_req_bytes, ocsp_test, nil, issuer, false)
+}
+
+func (wi *WorkItem) IssuedSerialTest(method string, ocsp_test *OCSPTest, issuer *x509.Certificate, cert *x509.Certificate, hash_algorithm crypto.Hash) {
+	opt := ocsp.RequestOptions{Hash: hash_algorithm}
+	ocsp_req_bytes, err := ocsp.CreateRequest(cert, issuer, &opt)
 	if wi.setErr(err, "ocsp.CreateRequest", ocsp_test) {
 		return
 	}
 
-	wi.doOCSP(method, ocsp_req_bytes, ocsp_test, cert, issuer)
+	wi.doOCSP(method, ocsp_req_bytes, ocsp_test, cert, issuer, true)
 }
 
 // WorkItem.Perform()
@@ -382,6 +413,14 @@ func (wi *WorkItem) Perform(db *sql.DB, w *Work) {
 	wi.forward_slashes_test.result.String = ""
 	wi.forward_slashes_test.dump = wi.forward_slashes_test.dump[:0]
 	wi.forward_slashes_test.duration = 0
+	wi.sha256_certid_test.result.Valid = false
+	wi.sha256_certid_test.result.String = ""
+	wi.sha256_certid_test.dump = wi.sha256_certid_test.dump[:0]
+	wi.sha256_certid_test.duration = 0
+	wi.unencoded_plus_test.result.Valid = false
+	wi.unencoded_plus_test.result.String = ""
+	wi.unencoded_plus_test.dump = wi.unencoded_plus_test.dump[:0]
+	wi.unencoded_plus_test.duration = 0
 
 	// Fetch and parse the/an Issuer certificate.
 	err := w.get_issuer_cert_statement.QueryRow(wi.ca_id).Scan(&wi.issuer_cert)
@@ -401,6 +440,10 @@ func (wi *WorkItem) Perform(db *sql.DB, w *Work) {
 	wi.ForwardSlashesTest("GET", &wi.forward_slashes_test, issuer)
 	log.Printf("Forward-slashes: %s [%d, %s]", wi.forward_slashes_test.result.String, wi.ca_id, wi.ocsp_responder_url)
 
+	// Test how the responder deals with non-URL-encoded "+" characters.
+	wi.UnencodedPlusTest("GET", &wi.unencoded_plus_test, issuer)
+	log.Printf("Unencoded-plus: %s [%d, %s]", wi.unencoded_plus_test.result.String, wi.ca_id, wi.ocsp_responder_url)
+
 	// Get an unexpired certificate issued by this issuer.
 	err = w.get_test_cert_statement.QueryRow(wi.ca_id).Scan(&wi.test_cert_id, &wi.test_cert)
 	if err == sql.ErrNoRows {
@@ -412,12 +455,16 @@ func (wi *WorkItem) Perform(db *sql.DB, w *Work) {
 	wi.checkErr(err)
 
 	// Test how the responder deals with a GET request for an unexpired cert.
-	wi.IssuedSerialTest("GET", &wi.get_test, issuer, cert)
+	wi.IssuedSerialTest("GET", &wi.get_test, issuer, cert, crypto.SHA1)
 	log.Printf("GET: %s [%d, %s]", wi.get_test.result.String, wi.ca_id, wi.ocsp_responder_url)
 
 	// Test how the responder deals with a POST request for an unexpired cert.
-	wi.IssuedSerialTest("POST", &wi.post_test, issuer, cert)
+	wi.IssuedSerialTest("POST", &wi.post_test, issuer, cert, crypto.SHA1)
 	log.Printf("POST: %s [%d, %s]", wi.post_test.result.String, wi.ca_id, wi.ocsp_responder_url)
+
+	// Test how the responder deals with SHA-256 CertIDs.
+	wi.IssuedSerialTest("GET", &wi.sha256_certid_test, issuer, cert, crypto.SHA256)
+	log.Printf("GET(SHA-256): %s [%d, %s]", wi.sha256_certid_test.result.String, wi.ca_id, wi.ocsp_responder_url)
 }
 
 // Work.UpdateStatement()
@@ -442,9 +489,15 @@ UPDATE ocsp_responder
 		POST_RANDOM_SERIAL_DURATION=$13,
 		FORWARD_SLASHES_RESULT=$14,
 		FORWARD_SLASHES_DUMP=$15,
-		FORWARD_SLASHES_DURATION=$16
-	WHERE CA_ID=$17
-		AND URL=$18
+		FORWARD_SLASHES_DURATION=$16,
+		SHA256_CERTID_RESULT=$17,
+		SHA256_CERTID_DUMP=$18,
+		SHA256_CERTID_DURATION=$19,
+		UNENCODED_PLUS_RESULT=$20,
+		UNENCODED_PLUS_DUMP=$21,
+		UNENCODED_PLUS_DURATION=$22
+	WHERE CA_ID=$23
+		AND URL=$24
 `
 }
 
@@ -458,5 +511,7 @@ func (wi *WorkItem) Update(update_statement *sql.Stmt) (sql.Result, error) {
 		wi.get_random_serial_test.result, wi.get_random_serial_test.dump, wi.get_random_serial_test.duration,
 		wi.post_random_serial_test.result, wi.post_random_serial_test.dump, wi.post_random_serial_test.duration,
 		wi.forward_slashes_test.result, wi.forward_slashes_test.dump, wi.forward_slashes_test.duration,
+		wi.sha256_certid_test.result, wi.sha256_certid_test.dump, wi.sha256_certid_test.duration,
+		wi.unencoded_plus_test.result, wi.unencoded_plus_test.dump, wi.unencoded_plus_test.duration,
 		wi.ca_id, wi.ocsp_responder_url)
 }
